@@ -75,6 +75,16 @@ export const unknown_to_stringArray_orThrow = (value: unknown, field: string): s
   return value.map((item, idx) => unknown_to_string_orThrow(item, `${field}[${idx}]`));
 };
 
+export const unknown_to_nullableDate_orThrow = (value: unknown, field: string): Date | null => {
+  if (value == null) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  if (typeof value === "string" || typeof value === "number") {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  throw new Error(`Field ${field} must be a Date or null, got ${typeof value}`);
+};
+
 export const cleanMeta = (meta: Record<string, unknown>): Record<string, unknown> => {
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(meta)) {

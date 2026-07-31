@@ -10,6 +10,7 @@
     "x6:upload-files": "bun run scripts/upload-inspiration-static-files.ts",
     "x6:submit-content": "bun run scripts/submit-inspiration-content.ts",
     "x6:submit-sites": "bun run scripts/submit-sites.ts",
+    "x6:submit-collections": "bun run scripts/submit-collections.ts",
     "x6:remove-content": "bun run scripts/remove-inspiration-content.ts",
     "repair:inspiration-media": "bun run scripts/repair-invalid-inspiration-media.ts",
     "web:dev": "bun --bun next dev",

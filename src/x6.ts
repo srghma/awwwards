@@ -14,6 +14,7 @@ import {
   unknown_to_nullableNonNegativeInteger_orThrow,
   unknown_to_mediaType_orThrow,
   unknown_to_stringArray_orThrow,
+  unknown_to_nullableDate_orThrow,
   cleanMeta,
 } from "./assertions";
 
@@ -840,6 +841,10 @@ export const parallelMap = async <T, R>(items: T[], concurrency: number, fn: (it
   return results;
 };
 
+export type CollectionSubmitMode =
+  | "just_upload_db_into_x6"
+  | "visit_awwwards_website__scrape_new_collections_and_their_sites_inspirations_if_new_added_and_then_upload_db_into_x6";
+
 export type X6CliOptions = {
   dry: boolean;
   dryRun: boolean;
@@ -851,6 +856,9 @@ export type X6CliOptions = {
   sendMode: SendMode;
   connectUrl?: string;
   remoteDebuggingPort?: number;
+  all: boolean;
+  unsubmittedOnly: boolean;
+  mode: CollectionSubmitMode | null;
 };
 
 export const parseCli = (args: string[]): X6CliOptions => {
@@ -873,9 +881,20 @@ export const parseCli = (args: string[]): X6CliOptions => {
     sendMode = "send_only_video_or_fallack_send_only_image";
   }
 
+  const rawMode = args.find(arg => arg.startsWith("--mode="))?.split("=", 2)[1];
+  let mode: CollectionSubmitMode | null = null;
+  if (rawMode === "visit_awwwards_website__scrape_new_collections_and_their_sites_inspirations_if_new_added_and_then_upload_db_into_x6") {
+    mode = "visit_awwwards_website__scrape_new_collections_and_their_sites_inspirations_if_new_added_and_then_upload_db_into_x6";
+  } else if (rawMode === "just_upload_db_into_x6") {
+    mode = "just_upload_db_into_x6";
+  } else if (rawMode != null) {
+    throw new Error(`Invalid --mode: '${rawMode}'. Must be 'just_upload_db_into_x6' or 'visit_awwwards_website__scrape_new_collections_and_their_sites_inspirations_if_new_added_and_then_upload_db_into_x6'`);
+  }
+
   const connectArg = args.find(arg => arg.startsWith("--connect="))?.split("=", 2)[1];
   const portArg = args.find(arg => arg.startsWith("--remote-debugging-port="))?.split("=", 2)[1];
   const remoteDebuggingPort = portArg ? Number.parseInt(portArg, 10) : undefined;
+  const unsubmittedOnly = args.includes("--unsubmitted-only");
 
   return {
     dry,
@@ -888,7 +907,33 @@ export const parseCli = (args: string[]): X6CliOptions => {
     sendMode,
     connectUrl: connectArg,
     remoteDebuggingPort,
+    all: !unsubmittedOnly,
+    unsubmittedOnly,
+    mode,
   };
+};
+
+export const isRecentDate = (date: Date | string | number | null | undefined, maxAgeDays = 5): boolean => {
+  if (!date) return false;
+  const timestamp = typeof date === "number"
+    ? (date > 1e11 ? date : date * 1000)
+    : typeof date === "string"
+      ? Date.parse(date)
+      : date.getTime();
+  if (Number.isNaN(timestamp)) return false;
+  return Date.now() - timestamp <= maxAgeDays * 24 * 60 * 60 * 1000;
+};
+
+export const getInspirationDate = (row: InspirationRow): Date | string | number | null => {
+  if (row.checked_source_url_at) return row.checked_source_url_at;
+  if (row.raw_json) {
+    try {
+      const parsed = JSON.parse(row.raw_json) as Record<string, unknown>;
+      const createdAt = parsed["createdAt"] ?? (parsed["model"] && isObject(parsed["model"]) ? parsed["model"]["createdAt"] : undefined);
+      if (typeof createdAt === "number" || typeof createdAt === "string") return createdAt;
+    } catch {}
+  }
+  return null;
 };
 
 export type VerifyInspirationsResult = {
@@ -903,19 +948,37 @@ export const verifyUncheckedInspirations = async (
     dry: boolean;
     concurrency: number;
     browserConfig: Parameters<typeof launchBrowser>[0];
+    maxAgeDays?: number;
   },
 ): Promise<VerifyInspirationsResult> => {
-  const uncheckedRows = rows.filter(row => row.checked_source_url_at == null);
+  const maxAgeDays = options.maxAgeDays ?? 5;
   const deletedSlugs = new Set<string>();
 
-  if (options.dry || uncheckedRows.length === 0) {
+  const recentRows: InspirationRow[] = [];
+  const needsCheckRows: InspirationRow[] = [];
+
+  for (const row of rows) {
+    const isCheckedRecently = row.checked_source_url_at != null && isRecentDate(row.checked_source_url_at, maxAgeDays);
+    const isCreatedRecently = isRecentDate(getInspirationDate(row), maxAgeDays);
+
+    if (isCheckedRecently || isCreatedRecently) {
+      recentRows.push(row);
+      if (row.checked_source_url_at == null && isCreatedRecently && !options.dry) {
+        await markElementUrlChecked(sql, row.slug);
+      }
+    } else {
+      needsCheckRows.push(row);
+    }
+  }
+
+  if (options.dry || needsCheckRows.length === 0) {
     const validRows = rows.filter(row => row.source_url != null && !deletedSlugs.has(row.slug));
     return { validRows, deletedSlugs };
   }
 
   const browser = await launchBrowser(options.browserConfig);
   try {
-    await parallelMap(uncheckedRows, options.concurrency, async row => {
+    await parallelMap(needsCheckRows, options.concurrency, async row => {
       if (!row.source_url) return null;
       try {
         const page = await browser.newPage();
@@ -1018,7 +1081,8 @@ export const submitX6ModerationContent = async (
   }
 
   if (response.status === 409 && isObject(body)) {
-    const matchedId = unknown_to_nullableString_orThrow(body["matchedId"] ?? body["fileId"] ?? body["id"], "409 matchedId");
+    const rawMatchedId = body["matchedId"] ?? body["fileId"] ?? body["id"];
+    const matchedId = rawMatchedId != null ? String(rawMatchedId) : null;
     if (matchedId) {
       const patchResponse = await fetchWithRetry(`${MODERATION_CONTENT_URL}/${matchedId}`, {
         method: "PATCH",
@@ -1250,6 +1314,12 @@ export const markSiteUrlChecked = async (sql: SQL, siteSlug: string): Promise<vo
   `;
 };
 
+export const getSiteDate = (site: SiteRow): Date | string | null => {
+  if (site.checked_source_url_at) return site.checked_source_url_at;
+  if (site.award_date) return site.award_date;
+  return null;
+};
+
 export type VerifySitesResult = {
   validSites: SiteRow[];
   invalidSlugs: Set<string>;
@@ -1262,19 +1332,37 @@ export const verifyUncheckedSites = async (
     dry: boolean;
     concurrency: number;
     browserConfig: Parameters<typeof launchBrowser>[0];
+    maxAgeDays?: number;
   },
 ): Promise<VerifySitesResult> => {
-  const uncheckedSites = sites.filter(s => s.checked_source_url_at == null);
+  const maxAgeDays = options.maxAgeDays ?? 5;
   const invalidSlugs = new Set<string>();
 
-  if (options.dry || uncheckedSites.length === 0) {
+  const recentSites: SiteRow[] = [];
+  const needsCheckSites: SiteRow[] = [];
+
+  for (const site of sites) {
+    const isCheckedRecently = site.checked_source_url_at != null && isRecentDate(site.checked_source_url_at, maxAgeDays);
+    const isCreatedRecently = isRecentDate(getSiteDate(site), maxAgeDays);
+
+    if (isCheckedRecently || isCreatedRecently) {
+      recentSites.push(site);
+      if (site.checked_source_url_at == null && isCreatedRecently && !options.dry) {
+        await markSiteUrlChecked(sql, site.slug);
+      }
+    } else {
+      needsCheckSites.push(site);
+    }
+  }
+
+  if (options.dry || needsCheckSites.length === 0) {
     const validSites = sites.filter(s => !invalidSlugs.has(s.slug));
     return { validSites, invalidSlugs };
   }
 
   const browser = await launchBrowser(options.browserConfig);
   try {
-    await parallelMap(uncheckedSites, options.concurrency, async site => {
+    await parallelMap(needsCheckSites, options.concurrency, async site => {
       const urlToCheck = site.awwwards_url ?? site.live_url;
       if (!urlToCheck) return null;
       try {
@@ -1313,4 +1401,227 @@ export const verifyUncheckedSites = async (
 
   const validSites = sites.filter(s => !invalidSlugs.has(s.slug));
   return { validSites, invalidSlugs };
+};
+
+export type CollectionRow = {
+  slug: string;
+  name: string;
+  url: string | null;
+  source_url: string | null;
+  category_name: string | null;
+  creator_username: string | null;
+  creator_name: string | null;
+  followers_count: number | null;
+  items_count: number | null;
+  sites_count: number | null;
+  inspirations_count: number | null;
+  raw_json: string | null;
+  x6_post_id: string | null;
+  x6_post_slug: string | null;
+  x6_post_status: string | null;
+  checked_source_url_at: Date | null;
+  sites: string[];
+  inspirations: string[];
+  files: string[];
+};
+
+export const loadCollectionRows = async (
+  sql: SQL,
+  options?: {
+    unsubmittedOnly?: boolean;
+    slug?: string;
+  },
+): Promise<CollectionRow[]> => {
+  const collectionList = await sql`
+    SELECT
+      c.slug,
+      c.name,
+      c.url,
+      c.source_url,
+      c.category_name,
+      c.creator_username,
+      c.creator_name,
+      c.followers_count,
+      c.items_count,
+      c.sites_count,
+      c.inspirations_count,
+      c.raw_json,
+      c.x6_post_id,
+      c.x6_post_slug,
+      c.x6_post_status,
+      c.checked_source_url_at
+    FROM collections c
+    WHERE (${options?.unsubmittedOnly ? true : false} = false OR c.x6_post_id IS NULL)
+      AND (${options?.slug ? true : false} = false OR c.slug = ${options?.slug ?? ""})
+    ORDER BY c.slug
+  ` as Array<Record<string, unknown>>;
+
+  if (collectionList.length === 0) return [];
+
+  const itemsList = await sql`
+    SELECT
+      ci.collection_slug,
+      ci.item_type,
+      ci.element_slug,
+      e.x6_file_id
+    FROM collection_items ci
+    LEFT JOIN elements e ON e.slug = ci.element_slug
+  ` as Array<{ collection_slug: string; item_type: string; element_slug: string; x6_file_id: string | null }>;
+
+  const itemsByCollection = new Map<string, { sites: Set<string>; inspirations: Set<string>; files: Set<string> }>();
+  for (const item of itemsList) {
+    let entry = itemsByCollection.get(item.collection_slug);
+    if (!entry) {
+      entry = { sites: new Set(), inspirations: new Set(), files: new Set() };
+      itemsByCollection.set(item.collection_slug, entry);
+    }
+    if (item.item_type === "site" && item.element_slug) {
+      entry.sites.add(item.element_slug);
+    } else if (item.item_type === "inspiration" && item.element_slug) {
+      entry.inspirations.add(item.element_slug);
+    }
+    if (item.x6_file_id) {
+      entry.files.add(item.x6_file_id);
+    }
+  }
+
+  return collectionList.map(row => {
+    const colSlug = unknown_to_nonEmptyString_orThrow(row["slug"], "collection.slug");
+    const itemData = itemsByCollection.get(colSlug) ?? { sites: new Set(), inspirations: new Set(), files: new Set() };
+
+    return {
+      slug: colSlug,
+      name: unknown_to_string_orThrow(row["name"], "collection.name"),
+      url: unknown_to_nullableString_orThrow(row["url"], "collection.url"),
+      source_url: unknown_to_nullableString_orThrow(row["source_url"], "collection.source_url"),
+      category_name: unknown_to_nullableString_orThrow(row["category_name"], "collection.category_name"),
+      creator_username: unknown_to_nullableString_orThrow(row["creator_username"], "collection.creator_username"),
+      creator_name: unknown_to_nullableString_orThrow(row["creator_name"], "collection.creator_name"),
+      followers_count: unknown_to_nullableNumber_orThrow(row["followers_count"], "collection.followers_count"),
+      items_count: unknown_to_nullableNumber_orThrow(row["items_count"], "collection.items_count"),
+      sites_count: unknown_to_nullableNumber_orThrow(row["sites_count"], "collection.sites_count"),
+      inspirations_count: unknown_to_nullableNumber_orThrow(row["inspirations_count"], "collection.inspirations_count"),
+      raw_json: unknown_to_nullableString_orThrow(row["raw_json"], "collection.raw_json"),
+      x6_post_id: unknown_to_nullableString_orThrow(row["x6_post_id"], "collection.x6_post_id"),
+      x6_post_slug: unknown_to_nullableString_orThrow(row["x6_post_slug"], "collection.x6_post_slug"),
+      x6_post_status: unknown_to_nullableString_orThrow(row["x6_post_status"], "collection.x6_post_status"),
+      checked_source_url_at: unknown_to_nullableDate_orThrow(row["checked_source_url_at"], "collection.checked_source_url_at"),
+      sites: unknown_to_stringArray_orThrow(Array.from(itemData.sites), "collection.sites"),
+      inspirations: unknown_to_stringArray_orThrow(Array.from(itemData.inspirations), "collection.inspirations"),
+      files: unknown_to_stringArray_orThrow(Array.from(itemData.files), "collection.files"),
+    };
+  });
+};
+
+export const saveX6CollectionPost = async (sql: SQL, collectionSlug: string, content: X6ContentResponse): Promise<void> => {
+  await sql`
+    UPDATE collections
+    SET x6_post_id = ${content.id},
+        x6_post_slug = ${content.slug},
+        x6_post_status = ${content.status}
+    WHERE slug = ${collectionSlug}
+  `;
+};
+
+export const markCollectionUrlChecked = async (sql: SQL, collectionSlug: string): Promise<void> => {
+  await sql`
+    UPDATE collections
+    SET checked_source_url_at = NOW()
+    WHERE slug = ${collectionSlug}
+  `;
+};
+
+export const getCollectionDate = (col: CollectionRow): Date | string | number | null => {
+  if (col.checked_source_url_at) return col.checked_source_url_at;
+  if (col.raw_json) {
+    try {
+      const parsed = JSON.parse(col.raw_json) as Record<string, unknown>;
+      const createdAt = parsed["createdAt"];
+      if (typeof createdAt === "number" || typeof createdAt === "string") return createdAt;
+    } catch {}
+  }
+  return null;
+};
+
+export type VerifyCollectionsResult = {
+  validCollections: CollectionRow[];
+  invalidSlugs: Set<string>;
+};
+
+export const verifyUncheckedCollections = async (
+  sql: SQL,
+  collections: CollectionRow[],
+  options: {
+    dry: boolean;
+    concurrency: number;
+    browserConfig: Parameters<typeof launchBrowser>[0];
+    maxAgeDays?: number;
+  },
+): Promise<VerifyCollectionsResult> => {
+  const maxAgeDays = options.maxAgeDays ?? 5;
+  const invalidSlugs = new Set<string>();
+
+  const recentCollections: CollectionRow[] = [];
+  const needsCheckCollections: CollectionRow[] = [];
+
+  for (const col of collections) {
+    const isCheckedRecently = col.checked_source_url_at != null && isRecentDate(col.checked_source_url_at, maxAgeDays);
+    const isCreatedRecently = isRecentDate(getCollectionDate(col), maxAgeDays);
+
+    if (isCheckedRecently || isCreatedRecently) {
+      recentCollections.push(col);
+      if (col.checked_source_url_at == null && isCreatedRecently && !options.dry) {
+        await markCollectionUrlChecked(sql, col.slug);
+      }
+    } else {
+      needsCheckCollections.push(col);
+    }
+  }
+
+  if (options.dry || needsCheckCollections.length === 0) {
+    const validCollections = collections.filter(c => !invalidSlugs.has(c.slug));
+    return { validCollections, invalidSlugs };
+  }
+
+  const browser = await launchBrowser(options.browserConfig);
+  try {
+    await parallelMap(needsCheckCollections, options.concurrency, async col => {
+      const urlToCheck = col.source_url ?? col.url;
+      if (!urlToCheck) return null;
+      try {
+        const page = await browser.newPage();
+        let status: number | null = null;
+        try {
+          const response = await page.goto(urlToCheck, { waitUntil: "domcontentloaded", timeout: 60000 });
+          status = response?.status() ?? null;
+        } finally {
+          await page.close();
+        }
+
+        if (status === 404 || status === 410) {
+          console.warn(`[x6-collections] collection ${col.slug} returned HTTP ${status}`);
+          invalidSlugs.add(col.slug);
+          return null;
+        }
+        if (status != null && status >= 400) {
+          console.warn(`[x6-collections] skipping collection ${col.slug}: HTTP ${status}`);
+          return null;
+        }
+        await markCollectionUrlChecked(sql, col.slug);
+        return col;
+      } catch (error) {
+        console.warn(`[x6-collections] skipping collection ${col.slug}: error verifying URL: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      }
+    });
+  } finally {
+    if (options.browserConfig.connectUrl || options.browserConfig.reuseExisting) {
+      browser.disconnect();
+    } else {
+      await browser.close();
+    }
+  }
+
+  const validCollections = collections.filter(c => !invalidSlugs.has(c.slug));
+  return { validCollections, invalidSlugs };
 };

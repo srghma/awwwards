@@ -172,12 +172,26 @@ export interface PendingCollectionItem {
 }
 
 const runMigrations = async (sql: SQL): Promise<void> => {
+  await sql`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      filename TEXT PRIMARY KEY,
+      applied_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    )
+  `;
+
+  const appliedRows = await sql`SELECT filename FROM schema_migrations` as Array<{ filename: string }>;
+  const applied = new Set(appliedRows.map(r => r.filename));
+
   const files = (await readdir("migrations"))
     .filter(name => name.endsWith(".sql"))
     .sort();
 
   for (const file of files) {
-    await sql.unsafe(await Bun.file(join("migrations", file)).text());
+    if (!applied.has(file)) {
+      console.log(`Running migration: ${file}`);
+      await sql.unsafe(await Bun.file(join("migrations", file)).text());
+      await sql`INSERT INTO schema_migrations (filename) VALUES (${file})`;
+    }
   }
 };
 
