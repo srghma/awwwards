@@ -1,0 +1,2 @@
+import { Shell } from "../../_components/route-pages";
+export default async function Page({ params }: { params: Promise<{ courseSlug: string }> }) { return <Shell title={(await params).courseSlug.replaceAll("-", " ")} subtitle="Awwwards Academy course"><section className="grid"><article className="panel panel-wide"><div className="card">Course details have not been scraped yet.</div></article></section></Shell>; }

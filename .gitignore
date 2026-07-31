@@ -1,3 +1,4 @@
+.env
 node_modules/
 data/
 *.db
@@ -6,3 +7,7 @@ data/
 .direnv/
 result
 .pg/
+.next/
+.chrome-user-data-dir/
+.chrome-user-data-dir2/
+.chrome-workers/

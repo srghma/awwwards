@@ -1,0 +1,1 @@
+ALTER TABLE elements ADD COLUMN IF NOT EXISTS rariran_content_slug TEXT DEFAULT NULL;

@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { join, extname } from "node:path";
+import { extname, join } from "node:path";
 
 export interface DownloadResult {
   localPath: string;

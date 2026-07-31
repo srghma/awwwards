@@ -1,0 +1,2 @@
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS sites_count INTEGER;
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS inspirations_count INTEGER;

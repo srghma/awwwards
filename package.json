@@ -5,22 +5,30 @@
   "main": "src/index.ts",
   "type": "module",
   "scripts": {
-    "start": "bun run src/index.ts",
-    "test": "bun test"
+    "scraper:start": "bun run src/index.ts",
+    "scraper:test": "bun test",
+    "x6:upload-files": "bun run scripts/upload-inspiration-static-files.ts",
+    "x6:submit-content": "bun run scripts/submit-inspiration-content.ts",
+    "x6:submit-sites": "bun run scripts/submit-sites.ts",
+    "x6:remove-content": "bun run scripts/remove-inspiration-content.ts",
+    "repair:inspiration-media": "bun run scripts/repair-invalid-inspiration-media.ts",
+    "web:dev": "bun --bun next dev",
+    "web:build": "bun --bun next build",
+    "web:start": "bun --bun next start"
   },
   "dependencies": {
     "@typescript/native-preview": "7.0.0-dev.20260707.2",
+    "next": "^16.2.10",
     "puppeteer": "^22.12.0",
     "puppeteer-extra": "^3.3.6",
-    "puppeteer-extra-plugin-stealth": "^2.11.2"
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",
-    "@types/node": "^26.1.1"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "puppeteer"
-    ]
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3"
   }
 }

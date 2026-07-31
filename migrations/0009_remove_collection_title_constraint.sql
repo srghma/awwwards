@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS collection_items_collection_type_title_uidx;
