@@ -62,8 +62,9 @@ async function main() {
   const sql = await initDb(databaseConnectionString());
 
   try {
-    const unsubmittedSites = await loadSiteRows(sql, { unsubmitted: true });
-    console.log(colors.cyan(`[x6-sites] total unsubmitted sites in DB: ${unsubmittedSites.length}`));
+    const resendMode = cliOptions.resendAlreadySentAndPatchIfAlreadyPresent;
+    const unsubmittedSites = await loadSiteRows(sql, { unsubmitted: !resendMode });
+    console.log(colors.cyan(`[x6-sites] total ${resendMode ? "" : "unsubmitted "}sites in DB: ${unsubmittedSites.length}${resendMode ? " (--resend-already-sent-and-patch-if-already-present enabled)" : ""}`));
 
     const isElementFullyUploadedAndChecked = (e: (typeof unsubmittedSites)[number]["elements"][number]): boolean => {
       if (e.checked_source_url_at == null) return false;
@@ -74,11 +75,12 @@ async function main() {
 
     const eligibleSites = unsubmittedSites.filter(site => {
       if (!site.live_url && !site.awwwards_url) return false;
+      if (resendMode) return true;
       if (site.elements.length === 0) return false;
       return site.elements.every(isElementFullyUploadedAndChecked);
     });
 
-    console.log(colors.cyan(`[x6-sites] ${eligibleSites.length} sites have all child inspiration media files uploaded AND verified non-404, and can be submitted`));
+    console.log(colors.cyan(`[x6-sites] ${eligibleSites.length} sites eligible for submission`));
 
     const concurrency = Math.max(1, cliOptions.concurrency);
     const targetSites = cliOptions.first ? eligibleSites.slice(0, cliOptions.first) : eligibleSites;
@@ -86,11 +88,12 @@ async function main() {
     console.log(colors.cyan(`[x6-sites] ${targetSites.length} sites selected for submission, concurrency=${concurrency}`));
 
     let verifiedSites = targetSites;
-    if (!cliOptions.noBrowserCheck) {
+    if (!cliOptions.noBrowserCheck && !resendMode) {
       console.log(colors.cyan(`[x6-sites] ${targetSites.length} sites need browser URL verification`));
       const verifyResult = await verifyUncheckedSites(sql, targetSites, {
         dry: cliOptions.dryRun,
         concurrency,
+        maxAgeDays: 6,
         browserConfig: {
           connectUrl: cliOptions.connectUrl ?? cliConfig.connectUrl,
           remoteDebuggingPort: cliOptions.remoteDebuggingPort ?? cliConfig.remoteDebuggingPort,
@@ -124,7 +127,6 @@ async function main() {
       const firstElem = validElements[0];
       if (!firstElem) return;
 
-      const previewId = firstElem.x6_static_file_id ?? firstElem.x6_file_id;
       const sourceUrl = site.awwwards_url ?? site.live_url!;
 
       const sections: X6CaseSection[] = [];
@@ -226,12 +228,12 @@ async function main() {
           contentId: site.x6_content_id ?? undefined,
           title: site.title,
           slug: site.slug,
-          previewId,
           sourceUrl,
           parser: "awwwards-site",
           tags,
           meta,
           sections,
+          forceResend: resendMode,
         }, logger);
 
         await saveSiteX6Content(sql, site.slug, content);

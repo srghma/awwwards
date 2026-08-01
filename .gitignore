@@ -11,3 +11,5 @@ result
 .chrome-user-data-dir/
 .chrome-user-data-dir2/
 .chrome-workers/
+dumps/
+*.sql.gz

@@ -13,6 +13,7 @@
     "x6:submit-collections": "bun run scripts/submit-collections.ts",
     "x6:remove-content": "bun run scripts/remove-inspiration-content.ts",
     "repair:inspiration-media": "bun run scripts/repair-invalid-inspiration-media.ts",
+    "db:dump": "scripts/dump-db-telegram.sh",
     "web:dev": "bun --bun next dev",
     "web:build": "bun --bun next build",
     "web:start": "bun --bun next start"

@@ -91,6 +91,7 @@ export type SubmitX6ContentInput = {
   sections?: X6CaseSection[];
   fileIds?: string[];
   type?: "image" | "video" | "mixed";
+  forceResend?: boolean;
 };
 
 export type InspirationRow = {
@@ -473,7 +474,13 @@ export const uploadX6File = async (apiKey: string, sourceUrl: string, logger: X6
   throw new Error(`X6 file upload exhausted retries: ${sourceUrl}`);
 };
 
-const fetchWithRetry = async (url: string, init: RequestInit, logger: X6Logger, maxRetries = 5): Promise<Response> => {
+const fetchWithRetry = async (
+  url: string,
+  init: RequestInit,
+  logger: X6Logger,
+  maxRetries = 5,
+  options?: { noRetryOn500?: boolean },
+): Promise<Response> => {
   const baseDelayMs = 1000;
   for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
     try {
@@ -489,7 +496,7 @@ const fetchWithRetry = async (url: string, init: RequestInit, logger: X6Logger, 
         responseBody: text,
       });
 
-      if (response.status >= 500 && attempt <= maxRetries) {
+      if (response.status >= 500 && !options?.noRetryOn500 && attempt <= maxRetries) {
         const delayMs = baseDelayMs * Math.pow(1.5, attempt - 1);
         console.warn(`[x6-retry] ${init.method ?? "GET"} ${url} returned HTTP ${response.status}; attempt ${attempt}/${maxRetries}, retrying in ${Math.round(delayMs)}ms...`);
         await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -549,26 +556,24 @@ export const submitX6Content = async (
   input: SubmitX6ContentInput,
   logger: X6Logger,
 ): Promise<X6ContentResponse> => {
-  const previewId = input.previewId ?? input.fileIds?.[input.fileIds.length - 1] ?? input.fileIds?.[0];
-
   const sections: X6CaseSection[] = input.sections ?? (
     input.type === "video"
       ? [
-          {
-            order: 1,
-            blocks: [
-              ...(input.fileIds?.[0] ? [{ type: "VIDEO" as const, order: 1, fileId: input.fileIds[0] }] : []),
-            ],
-          },
-        ]
+        {
+          order: 1,
+          blocks: [
+            ...(input.fileIds?.[0] ? [{ type: "VIDEO" as const, order: 1, fileId: input.fileIds[0] }] : []),
+          ],
+        },
+      ]
       : [
-          {
-            order: 1,
-            blocks: [
-              ...(input.fileIds?.[0] ? [{ type: "IMAGE" as const, order: 1, fileId: input.fileIds[0] }] : []),
-            ],
-          },
-        ]
+        {
+          order: 1,
+          blocks: [
+            ...(input.fileIds?.[0] ? [{ type: "IMAGE" as const, order: 1, fileId: input.fileIds[0] }] : []),
+          ],
+        },
+      ]
   );
 
   const tags = input.tags
@@ -590,12 +595,14 @@ export const submitX6Content = async (
     parser: input.parser,
     ...(input.title ? { title: input.title } : {}),
     ...(targetSlug ? { slug: targetSlug } : {}),
-    ...(previewId ? { previewId } : {}),
     ...(tags && tags.length > 0 ? { tags } : {}),
     ...(categories && categories.length > 0 ? { categories } : {}),
     ...(meta ? { meta } : {}),
     sections,
   });
+
+  const forceResend = input.forceResend ?? false;
+  const retryOpts = forceResend ? { noRetryOn500: true } : undefined;
 
   let payload = buildPayload(originalSlug);
   let response = await fetchWithRetry(CONTENT_URL, {
@@ -605,11 +612,11 @@ export const submitX6Content = async (
       "content-type": "application/json",
     },
     body: JSON.stringify(payload),
-  }, logger);
+  }, logger, 5, retryOpts);
 
   if (!response.ok && originalSlug && prefisedSlug) {
     const text = await response.clone().text();
-    if (text.includes("Slug is not available")) {
+    if (text.includes("Slug is not available") || (forceResend && response.status === 500)) {
       payload = buildPayload(prefisedSlug);
       response = await fetchWithRetry(CONTENT_URL, {
         method: "POST",
@@ -618,38 +625,42 @@ export const submitX6Content = async (
           "content-type": "application/json",
         },
         body: JSON.stringify(payload),
-      }, logger);
+      }, logger, 5, retryOpts);
     }
   }
 
   if (!response.ok) {
-    const text = await response.clone().text();
-    if (text.includes("Slug is not available")) {
-      let targetId = input.contentId;
-      if (!targetId) {
-        const existingCases = await getX6Content(apiKey);
-        const match = existingCases.find(c => c.slug === originalSlug || c.slug === prefisedSlug || c.slug === input.slug);
-        if (match) targetId = match.id;
-      }
+    let targetId = input.contentId;
+    if (!targetId) {
+      const existingCases = await getX6Content(apiKey);
+      const match = existingCases.find(c => c.slug === originalSlug || c.slug === prefisedSlug || c.slug === input.slug);
+      if (match) targetId = match.id;
+    }
 
-      if (targetId) {
-        response = await fetchWithRetry(`${CONTENT_URL}/${targetId}`, {
-          method: "PATCH",
-          headers: {
-            "x-api-key": apiKey,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify(buildPayload(undefined)),
-        }, logger);
-      } else {
-        response = await fetchWithRetry(CONTENT_URL, {
-          method: "POST",
-          headers: {
-            "x-api-key": apiKey,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify(buildPayload(undefined)),
-        }, logger);
+    if (targetId) {
+      const patchResponse = await fetchWithRetry(`${CONTENT_URL}/${targetId}`, {
+        method: "PATCH",
+        headers: {
+          "x-api-key": apiKey,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(buildPayload(undefined)),
+      }, logger);
+
+      if (patchResponse.ok) {
+        response = patchResponse;
+      } else if (forceResend) {
+        const patchText = await patchResponse.clone().text();
+        if (patchResponse.status === 404 || patchText.includes("Case not found")) {
+          response = await fetchWithRetry(CONTENT_URL, {
+            method: "POST",
+            headers: {
+              "x-api-key": apiKey,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify(buildPayload(undefined)),
+          }, logger, 5, retryOpts);
+        }
       }
     }
   }
@@ -859,6 +870,7 @@ export type X6CliOptions = {
   all: boolean;
   unsubmittedOnly: boolean;
   mode: CollectionSubmitMode | null;
+  resendAlreadySentAndPatchIfAlreadyPresent: boolean;
 };
 
 export const parseCli = (args: string[]): X6CliOptions => {
@@ -910,10 +922,13 @@ export const parseCli = (args: string[]): X6CliOptions => {
     all: !unsubmittedOnly,
     unsubmittedOnly,
     mode,
+    resendAlreadySentAndPatchIfAlreadyPresent: args.includes("--resend-already-sent-and-patch-if-already-present"),
   };
 };
 
-export const isRecentDate = (date: Date | string | number | null | undefined, maxAgeDays = 5): boolean => {
+const referenceDate = new Date("2026-08-01T00:00:00Z")
+
+export const isRecentDate = (date: Date | string | number | null | undefined, maxAgeDays = 6): boolean => {
   if (!date) return false;
   const timestamp = typeof date === "number"
     ? (date > 1e11 ? date : date * 1000)
@@ -921,7 +936,8 @@ export const isRecentDate = (date: Date | string | number | null | undefined, ma
       ? Date.parse(date)
       : date.getTime();
   if (Number.isNaN(timestamp)) return false;
-  return Date.now() - timestamp <= maxAgeDays * 24 * 60 * 60 * 1000;
+  const now = referenceDate.getTime();
+  return Math.abs(now - timestamp) <= maxAgeDays * 24 * 60 * 60 * 1000;
 };
 
 export const getInspirationDate = (row: InspirationRow): Date | string | number | null => {
@@ -931,7 +947,7 @@ export const getInspirationDate = (row: InspirationRow): Date | string | number 
       const parsed = JSON.parse(row.raw_json) as Record<string, unknown>;
       const createdAt = parsed["createdAt"] ?? (parsed["model"] && isObject(parsed["model"]) ? parsed["model"]["createdAt"] : undefined);
       if (typeof createdAt === "number" || typeof createdAt === "string") return createdAt;
-    } catch {}
+    } catch { }
   }
   return null;
 };
@@ -1335,7 +1351,7 @@ export const verifyUncheckedSites = async (
     maxAgeDays?: number;
   },
 ): Promise<VerifySitesResult> => {
-  const maxAgeDays = options.maxAgeDays ?? 5;
+  const maxAgeDays = options.maxAgeDays ?? 6;
   const invalidSlugs = new Set<string>();
 
   const recentSites: SiteRow[] = [];
@@ -1344,10 +1360,11 @@ export const verifyUncheckedSites = async (
   for (const site of sites) {
     const isCheckedRecently = site.checked_source_url_at != null && isRecentDate(site.checked_source_url_at, maxAgeDays);
     const isCreatedRecently = isRecentDate(getSiteDate(site), maxAgeDays);
+    const isAlreadySubmitted = site.x6_content_id != null;
 
-    if (isCheckedRecently || isCreatedRecently) {
+    if (isCheckedRecently || isCreatedRecently || isAlreadySubmitted) {
       recentSites.push(site);
-      if (site.checked_source_url_at == null && isCreatedRecently && !options.dry) {
+      if (site.checked_source_url_at == null && (isCreatedRecently || isAlreadySubmitted) && !options.dry) {
         await markSiteUrlChecked(sql, site.slug);
       }
     } else {
@@ -1538,7 +1555,7 @@ export const getCollectionDate = (col: CollectionRow): Date | string | number | 
       const parsed = JSON.parse(col.raw_json) as Record<string, unknown>;
       const createdAt = parsed["createdAt"];
       if (typeof createdAt === "number" || typeof createdAt === "string") return createdAt;
-    } catch {}
+    } catch { }
   }
   return null;
 };
