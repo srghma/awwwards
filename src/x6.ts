@@ -595,6 +595,7 @@ export const submitX6Content = async (
     parser: input.parser,
     ...(input.title ? { title: input.title } : {}),
     ...(targetSlug ? { slug: targetSlug } : {}),
+    ...(input.previewId ? { previewId: input.previewId } : {}),
     ...(tags && tags.length > 0 ? { tags } : {}),
     ...(categories && categories.length > 0 ? { categories } : {}),
     ...(meta ? { meta } : {}),

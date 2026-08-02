@@ -7,6 +7,8 @@ import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   getRawPageCache,
+  getRawPageCacheEntry,
+  isToday,
   saveRawPageCache,
   insertUser,
   insertSite,
@@ -210,6 +212,8 @@ const detectParser = (url: string): "site" | "element" | "collection" | "directo
   return "site";
 };
 
+const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
 const scrollUntilStable = async (page: Page, selector: string, maxRounds = 40): Promise<void> => {
   let lastCount = -1;
   let stableRounds = 0;
@@ -225,7 +229,165 @@ const scrollUntilStable = async (page: Page, selector: string, maxRounds = 40): 
   }
 };
 
-const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+export type ParsedAwwwardsPage =
+  | { type: "site"; slug: string }
+  | { type: "inspiration"; slug: string }
+  | { type: "collection"; name_of_curator?: string; collection_name: string }
+  | { type: "collections" }
+  | { type: "websites"; subpath?: string }
+  | { type: "elements"; category?: string }
+  | { type: "directory" }
+  | { type: "directory_profile"; username: string }
+  | { type: "user"; username: string }
+  | { type: "search"; query?: string }
+  | { type: "static_info_page"; name: string };
+
+export type AwwwardsUrlCachePolicy = "cached" | "cached_but_refetch_if_stale";
+
+const RESERVED_PATHS = new Set([
+  "",
+  "websites",
+  "elements",
+  "collections",
+  "directory",
+  "search",
+  "inspiration_search",
+  "about-evaluation",
+  "winners",
+  "submissions",
+  "awards",
+  "users",
+  "sites",
+  "inspiration",
+]);
+
+export const parseAwwwardsUrl = (url: string): ParsedAwwwardsPage => {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    throw new Error(`Invalid URL string: ${JSON.stringify(url)}`);
+  }
+
+  const hostname = parsedUrl.hostname.toLowerCase();
+  if (hostname !== "awwwards.com" && !hostname.endsWith(".awwwards.com")) {
+    throw new Error(`URL is not an awwwards.com website URL: ${url}`);
+  }
+
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new Error(`Invalid URL protocol (expected http/https): ${url}`);
+  }
+
+  const pathname = parsedUrl.pathname.replace(/\/+$/, "") || "/";
+  const segments = pathname.split("/").filter(Boolean);
+
+  if (segments.length === 0) {
+    return { type: "static_info_page", name: "home" };
+  }
+
+  const first = segments[0]!.toLowerCase();
+
+  if (first === "sites") {
+    if (segments.length === 2 && segments[1] && segments[1] !== "search") {
+      return { type: "site", slug: segments[1] };
+    }
+    return { type: "websites", subpath: segments.slice(1).join("/") || undefined };
+  }
+
+  if (first === "inspiration") {
+    if (segments.length === 2 && segments[1]) {
+      return { type: "inspiration", slug: segments[1] };
+    }
+    return { type: "search", query: segments[1] ? decodeURIComponent(segments[1]) : undefined };
+  }
+
+  if (first === "collections") {
+    if (segments.length === 1) {
+      return { type: "collections" };
+    }
+    if (segments.length === 2 && segments[1]) {
+      return { type: "collection", collection_name: segments[1] };
+    }
+    return { type: "collections" };
+  }
+
+  if (segments.length === 3 && segments[1]?.toLowerCase() === "collections" && segments[0] && segments[2]) {
+    return {
+      type: "collection",
+      name_of_curator: segments[0],
+      collection_name: segments[2],
+    };
+  }
+
+  if (first === "directory") {
+    if (segments.length === 1) {
+      return { type: "directory" };
+    }
+    if (segments.length === 2 && segments[1]) {
+      return { type: "directory_profile", username: segments[1] };
+    }
+    return { type: "directory" };
+  }
+
+  if (first === "users") {
+    if (segments.length === 2 && segments[1]) {
+      return { type: "directory_profile", username: segments[1] };
+    }
+    return { type: "directory" };
+  }
+
+  if (first === "websites") {
+    return { type: "websites", subpath: segments.slice(1).join("/") || undefined };
+  }
+
+  if (first === "elements") {
+    return { type: "elements", category: segments[1] || undefined };
+  }
+
+  if (first === "search" || first === "inspiration_search") {
+    const rawQuery = segments[1] ?? parsedUrl.searchParams.get("text") ?? undefined;
+    return { type: "search", query: rawQuery ? decodeURIComponent(rawQuery) : undefined };
+  }
+
+  if (first === "about-evaluation" || first === "winners" || first === "submissions" || first === "awards") {
+    return { type: "static_info_page", name: first };
+  }
+
+  if (segments.length === 1 && !RESERVED_PATHS.has(first) && /^[a-zA-Z0-9_-]+$/.test(first)) {
+    return { type: "user", username: segments[0]! };
+  }
+
+  throw new Error(`Unknown awwwards.com URL pattern: ${url}`);
+};
+
+export const awwardsPageIsCached = (page: ParsedAwwwardsPage): AwwwardsUrlCachePolicy => {
+  switch (page.type) {
+    case "site":
+    case "inspiration":
+    case "collection":
+    case "directory_profile":
+    case "user":
+      return "cached";
+
+    case "collections":
+    case "websites":
+    case "elements":
+    case "directory":
+    case "search":
+    case "static_info_page":
+      return "cached_but_refetch_if_stale";
+  }
+};
+
+export const typeOfAwwwardsPage = awwardsPageIsCached;
+
+export const awwardsUrlIsCached = (url: string): AwwwardsUrlCachePolicy => {
+  const page = parseAwwwardsUrl(url);
+  return awwardsPageIsCached(page);
+};
+
+export const awwwardsUrlIsCached = awwardsUrlIsCached;
+export const typeOfAwwwardsUrl = awwardsUrlIsCached;
 
 const gotoWithTransientServerRetry = async (
   page: Page,
@@ -235,12 +397,23 @@ const gotoWithTransientServerRetry = async (
   sql?: SQL | null,
   optionsOverride?: { refreshCache?: boolean },
 ): Promise<Awaited<ReturnType<Page["goto"]>>> => {
+  const cachePolicy = awwardsUrlIsCached(url);
+
   if (sql && !optionsOverride?.refreshCache) {
-    const cachedHtml = await getRawPageCache(sql, url);
-    if (cachedHtml) {
-      console.log(`[CACHE HIT] Loaded ${pageType} HTML for ${url} from raw_pages_cache`);
-      await page.setContent(cachedHtml, { waitUntil: "domcontentloaded" });
-      return null;
+    const entry = await getRawPageCacheEntry(sql, url);
+    if (entry) {
+      const isStale = !isToday(entry.updated_at);
+      const useCache = cachePolicy === "cached" || (cachePolicy === "cached_but_refetch_if_stale" && !isStale);
+
+      if (useCache) {
+        console.log(`[CACHE HIT] Loaded ${pageType} HTML for ${url} from raw_pages_cache (policy: ${cachePolicy}, updated_at: ${entry.updated_at.toISOString()})`);
+        await page.setContent(entry.html, { waitUntil: "domcontentloaded" });
+        return null;
+      }
+
+      if (cachePolicy === "cached_but_refetch_if_stale" && isStale) {
+        console.log(`[CACHE STALE] Cached HTML for ${url} is stale (updated_at: ${entry.updated_at.toISOString()}), refetching from source...`);
+      }
     }
   }
 
@@ -285,7 +458,7 @@ const gotoWithTransientServerRetry = async (
       const html = await page.content();
       if (html && html.length > 0) {
         await saveRawPageCache(sql, url, html);
-        console.log(`[CACHE STORE] Saved ${pageType} HTML for ${url} into raw_pages_cache (${html.length} bytes)`);
+        console.log(`[CACHE STORE] Saved ${pageType} HTML for ${url} into raw_pages_cache (${html.length} bytes, policy: ${cachePolicy})`);
       }
     } catch (err) {
       console.warn(`[CACHE WARN] Failed to save raw_pages_cache for ${url}:`, err);

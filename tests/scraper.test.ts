@@ -204,3 +204,84 @@ describe("Raw Pages Cache Database Layer", () => {
     await sql.close();
   });
 });
+
+describe("Awwwards URL Parser & Classifier (parseAwwwardsUrl, typeOfAwwwardsPage, typeOfAwwwardsUrl)", () => {
+  it("should parse awwwards URLs into structured discriminated union variants", () => {
+    const { parseAwwwardsUrl } = require("../src/scraper");
+
+    expect(parseAwwwardsUrl("https://www.awwwards.com/collections/")).toEqual({ type: "collections" });
+    expect(parseAwwwardsUrl("https://www.awwwards.com/Mixallo/collections/pastel-colors/")).toEqual({
+      type: "collection",
+      name_of_curator: "Mixallo",
+      collection_name: "pastel-colors",
+    });
+    expect(parseAwwwardsUrl("https://www.awwwards.com/collections/pastel-colors/")).toEqual({
+      type: "collection",
+      collection_name: "pastel-colors",
+    });
+    expect(parseAwwwardsUrl("https://www.awwwards.com/sites/zulu-longines")).toEqual({
+      type: "site",
+      slug: "zulu-longines",
+    });
+    expect(parseAwwwardsUrl("https://www.awwwards.com/inspiration/immersive-experience-1")).toEqual({
+      type: "inspiration",
+      slug: "immersive-experience-1",
+    });
+    expect(parseAwwwardsUrl("https://www.awwwards.com/directory/immersivegarden")).toEqual({
+      type: "directory_profile",
+      username: "immersivegarden",
+    });
+    expect(parseAwwwardsUrl("https://www.awwwards.com/users/immersivegarden/")).toEqual({
+      type: "directory_profile",
+      username: "immersivegarden",
+    });
+    expect(parseAwwwardsUrl("https://www.awwwards.com/immersivegarden/")).toEqual({
+      type: "user",
+      username: "immersivegarden",
+    });
+  });
+
+  it("should classify collection / listing / search / index URLs as cached_but_refetch_if_stale", () => {
+    const { awwardsUrlIsCached } = require("../src/scraper");
+
+    expect(awwardsUrlIsCached("https://www.awwwards.com/websites/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/websites/sotd/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/websites/sites_of_the_day/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/websites/nominees/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/elements/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/elements/navigation/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/collections/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/directory/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/inspiration_search/Zulu%20Longines/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/search/")).toBe("cached_but_refetch_if_stale");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/")).toBe("cached_but_refetch_if_stale");
+  });
+
+  it("should classify non-collection / detail URLs as cached", () => {
+    const { awwardsUrlIsCached } = require("../src/scraper");
+
+    expect(awwardsUrlIsCached("https://www.awwwards.com/sites/zulu-longines")).toBe("cached");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/inspiration/immersive-experience-1")).toBe("cached");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/collections/minimal-portfolios")).toBe("cached");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/Mixallo/collections/pastel-colors/")).toBe("cached");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/directory/immersivegarden")).toBe("cached");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/users/immersivegarden/")).toBe("cached");
+    expect(awwardsUrlIsCached("https://www.awwwards.com/immersivegarden/")).toBe("cached");
+  });
+
+  it("should correctly check if a date is today using isToday helper", () => {
+    const { isToday } = require("../src/db");
+    expect(isToday(new Date())).toBe(true);
+    expect(isToday(new Date("2020-01-01T00:00:00Z"))).toBe(false);
+  });
+
+  it("should throw error for non-awwwards URLs or unknown/invalid URLs", () => {
+    const { awwardsUrlIsCached } = require("../src/scraper");
+
+    expect(() => awwardsUrlIsCached("invalid-url-string")).toThrow("Invalid URL string");
+    expect(() => awwardsUrlIsCached("https://google.com/sites/zulu-longines")).toThrow("URL is not an awwwards.com website URL");
+    expect(() => awwardsUrlIsCached("https://example.com/foo")).toThrow("URL is not an awwwards.com website URL");
+    expect(() => awwardsUrlIsCached("https://www.awwwards.com/unknown_unrecognized_route/foo/bar/baz/123/xyz")).toThrow("Unknown awwwards.com URL pattern");
+  });
+});
+

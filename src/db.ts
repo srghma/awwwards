@@ -691,9 +691,33 @@ export const setScraperMetadata = async (sql: SQL, key: string, value: string): 
   `;
 };
 
+export type RawPageCacheEntry = {
+  html: string;
+  updated_at: Date;
+};
+
+export const isToday = (date: Date): boolean => {
+  const now = new Date();
+  return (
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  );
+};
+
+export const getRawPageCacheEntry = async (sql: SQL, url: string): Promise<RawPageCacheEntry | null> => {
+  const rows = await sql`SELECT html, updated_at FROM raw_pages_cache WHERE url = ${url} LIMIT 1` as Array<{ html: string; updated_at: Date | string }>;
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    html: row.html,
+    updated_at: new Date(row.updated_at),
+  };
+};
+
 export const getRawPageCache = async (sql: SQL, url: string): Promise<string | null> => {
-  const rows = await sql`SELECT html FROM raw_pages_cache WHERE url = ${url} LIMIT 1` as Array<{ html: string }>;
-  return rows[0]?.html ?? null;
+  const entry = await getRawPageCacheEntry(sql, url);
+  return entry?.html ?? null;
 };
 
 export const saveRawPageCache = async (sql: SQL, url: string, html: string): Promise<void> => {

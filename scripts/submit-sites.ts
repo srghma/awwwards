@@ -127,33 +127,12 @@ async function main() {
       const firstElem = validElements[0];
       if (!firstElem) return;
 
+      const previewId = firstElem.x6_static_file_id ?? (firstElem.media_type === "image" ? firstElem.x6_file_id : undefined);
+
       const sourceUrl = site.awwwards_url ?? site.live_url!;
 
       const sections: X6CaseSection[] = [];
       let sectionOrder = 1;
-
-      if (site.description) {
-        sections.push({
-          order: sectionOrder++,
-          blocks: [{
-            type: "TEXT",
-            order: 1,
-            content: buildLexicalTextContent([site.description], "Website Description"),
-          }],
-        });
-      }
-
-      const scoresContent = buildScoresTextContent(site);
-      if (scoresContent) {
-        sections.push({
-          order: sectionOrder++,
-          blocks: [{
-            type: "TEXT",
-            order: 1,
-            content: scoresContent,
-          }],
-        });
-      }
 
       for (const elem of validElements) {
         if (elem.media_type === "video") {
@@ -178,6 +157,29 @@ async function main() {
             blocks: [{ type: "IMAGE", order: 1, fileId: elem.x6_file_id }],
           });
         }
+      }
+
+      if (site.description) {
+        sections.push({
+          order: sectionOrder++,
+          blocks: [{
+            type: "TEXT",
+            order: 1,
+            content: buildLexicalTextContent([site.description], "Website Description"),
+          }],
+        });
+      }
+
+      const scoresContent = buildScoresTextContent(site);
+      if (scoresContent) {
+        sections.push({
+          order: sectionOrder++,
+          blocks: [{
+            type: "TEXT",
+            order: 1,
+            content: scoresContent,
+          }],
+        });
       }
 
       const votesContent = buildVotesTextContent(site);
@@ -231,6 +233,7 @@ async function main() {
           contentId: site.x6_content_id ?? undefined,
           title,
           slug: site.slug,
+          previewId,
           sourceUrl,
           parser: "awwwards-site",
           tags,
