@@ -198,9 +198,12 @@ async function main() {
         ...site.site_colors,
       ].map(t => t.trim()).filter(Boolean)));
 
+      const isSotd = site.award_type === "SOTD";
+      const title = isSotd ? `${site.title} (SOTD)` : site.title;
+
       const meta: Record<string, unknown> = {
         slug: site.slug,
-        title: site.title,
+        title,
         source_url: sourceUrl,
         live_url: site.live_url,
         awwwards_url: site.awwwards_url,
@@ -226,7 +229,7 @@ async function main() {
       try {
         const content = await submitX6Content(apiKey, {
           contentId: site.x6_content_id ?? undefined,
-          title: site.title,
+          title,
           slug: site.slug,
           sourceUrl,
           parser: "awwwards-site",

@@ -2,9 +2,12 @@ import puppeteer from "puppeteer-extra";
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import type { Browser, Page } from "puppeteer";
 import { SQL } from "bun";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
+  getRawPageCache,
+  saveRawPageCache,
   insertUser,
   insertSite,
   insertSiteTechnology,
@@ -184,7 +187,7 @@ export const parseOptionalScore = (value: string | null | undefined, field: stri
 };
 
 const assertSuccessfulPage = (response: Awaited<ReturnType<Page["goto"]>>, url: string, pageType: string): void => {
-  if (!response) throw new Error(`${pageType} page did not return an HTTP response: ${url}`);
+  if (response == null) return;
   if (response.status() >= 400) throw new Error(`${pageType} response ${response.status()}: ${url}`);
 };
 
@@ -229,14 +232,27 @@ const gotoWithTransientServerRetry = async (
   url: string,
   options: Parameters<Page["goto"]>[1],
   pageType: string,
+  sql?: SQL | null,
+  optionsOverride?: { refreshCache?: boolean },
 ): Promise<Awaited<ReturnType<Page["goto"]>>> => {
+  if (sql && !optionsOverride?.refreshCache) {
+    const cachedHtml = await getRawPageCache(sql, url);
+    if (cachedHtml) {
+      console.log(`[CACHE HIT] Loaded ${pageType} HTML for ${url} from raw_pages_cache`);
+      await page.setContent(cachedHtml, { waitUntil: "domcontentloaded" });
+      return null;
+    }
+  }
+
   const maxAttempts = 3;
   let lastError: unknown = null;
+  let response: Awaited<ReturnType<Page["goto"]>> = null;
+
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
-      const response = await page.goto(url, options);
+      response = await page.goto(url, options);
       if (response == null || response.status() < 500 || attempt === maxAttempts) {
-        return response;
+        break;
       }
 
       console.warn(`${pageType} response ${response.status()} for ${url}; retrying (${attempt}/${maxAttempts - 1})`);
@@ -252,15 +268,73 @@ const gotoWithTransientServerRetry = async (
     await sleep(attempt * 1000);
   }
 
-  console.warn(`${pageType} navigation still failed for ${url}; retrying once without request interception.`);
-  try {
-    await page.setRequestInterception(false);
-    page.removeAllListeners("request");
-    await sleep(500);
-    return await page.goto(url, options);
-  } catch (fallbackError) {
-    throw lastError ?? fallbackError ?? new Error(`${pageType} navigation failed: ${url}`);
+  if (response == null && lastError) {
+    console.warn(`${pageType} navigation still failed for ${url}; retrying once without request interception.`);
+    try {
+      await page.setRequestInterception(false);
+      page.removeAllListeners("request");
+      await sleep(500);
+      response = await page.goto(url, options);
+    } catch (fallbackError) {
+      throw lastError ?? fallbackError ?? new Error(`${pageType} navigation failed: ${url}`);
+    }
   }
+
+  if (sql && (response == null || response.status() < 400)) {
+    try {
+      const html = await page.content();
+      if (html && html.length > 0) {
+        await saveRawPageCache(sql, url, html);
+        console.log(`[CACHE STORE] Saved ${pageType} HTML for ${url} into raw_pages_cache (${html.length} bytes)`);
+      }
+    } catch (err) {
+      console.warn(`[CACHE WARN] Failed to save raw_pages_cache for ${url}:`, err);
+    }
+  }
+
+  return response;
+};
+
+export const fetchAndCacheExternalSite = async (
+  page: Page,
+  sql: SQL | null | undefined,
+  liveUrl: string,
+  optionsOverride?: { refreshCache?: boolean },
+): Promise<string | null> => {
+  if (!sql || !liveUrl || !liveUrl.startsWith("http") || liveUrl.includes("awwwards.com")) {
+    return null;
+  }
+
+  const refreshCache = optionsOverride?.refreshCache ?? false;
+  if (!refreshCache) {
+    const cachedHtml = await getRawPageCache(sql, liveUrl);
+    if (cachedHtml) {
+      console.log(`[CACHE HIT] External site HTML already cached for ${liveUrl}`);
+      return cachedHtml;
+    }
+  }
+
+  console.log(`[EXTERNAL SCRAPE] Fetching external live site: ${liveUrl}`);
+  try {
+    const externalPage = await page.browser().newPage();
+    try {
+      await externalPage.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+      await configurePageBandwidth(externalPage);
+      await externalPage.goto(liveUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+      const html = await externalPage.content();
+      if (html && html.length > 0) {
+        await saveRawPageCache(sql, liveUrl, html);
+        console.log(`[EXTERNAL CACHE STORE] Saved external site HTML for ${liveUrl} into raw_pages_cache (${html.length} bytes)`);
+        return html;
+      }
+    } finally {
+      await externalPage.close().catch(() => {});
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    console.warn(`[EXTERNAL SCRAPE WARN] Failed to fetch external live site ${liveUrl}: ${msg}`);
+  }
+  return null;
 };
 
 const shouldBlockHeavyRequests = (): boolean => {
@@ -319,22 +393,26 @@ export const launchBrowser = async (config: ScraperConfig): Promise<Browser> => 
     }) as unknown as Browser;
   }
 
-  if (config.reuseExisting) {
-    try {
-      const version = await fetch(`http://127.0.0.1:${config.remoteDebuggingPort}/json/version`);
-      if (version.ok) {
-        const data = await version.json() as { webSocketDebuggerUrl?: string };
-        if (data.webSocketDebuggerUrl) {
-          console.log(`Connecting to existing Chrome via local debug session: ${data.webSocketDebuggerUrl}`);
-          return await puppeteer.connect({
-            browserWSEndpoint: data.webSocketDebuggerUrl,
-            defaultViewport: null,
-          }) as unknown as Browser;
-        }
+  // Attempt auto-connect to running debug Chrome on port 9222 / remoteDebuggingPort
+  try {
+    const version = await fetch(`http://127.0.0.1:${config.remoteDebuggingPort}/json/version`);
+    if (version.ok) {
+      const data = await version.json() as { webSocketDebuggerUrl?: string };
+      if (data.webSocketDebuggerUrl) {
+        console.log(`Connecting to existing Chrome via local debug session: ${data.webSocketDebuggerUrl}`);
+        return await puppeteer.connect({
+          browserWSEndpoint: data.webSocketDebuggerUrl,
+          defaultViewport: null,
+        }) as unknown as Browser;
       }
-    } catch {
+    }
+  } catch {
+    if (config.reuseExisting) {
       throw new Error(`Could not connect to existing Chrome on port ${config.remoteDebuggingPort}. Start Chrome with remote debugging or omit --reuse-existing.`);
     }
+  }
+
+  if (config.reuseExisting) {
     throw new Error(`No Chrome debug endpoint found on port ${config.remoteDebuggingPort}. Start Chrome with remote debugging or omit --reuse-existing.`);
   }
 
@@ -345,9 +423,29 @@ export const launchBrowser = async (config: ScraperConfig): Promise<Browser> => 
     : resolve(join(process.env["AWWWARDS_BROWSER_WORK_DIR"] ?? ".chrome-workers", workerId));
   await mkdir(userDataDir, { recursive: true });
   const windowOffset = config.windowIndex * 40;
+
+  let executablePath = process.env["PUPPETEER_EXECUTABLE_PATH"];
+  if (!executablePath) {
+    const candidates = [
+      "/run/current-system/sw/bin/google-chrome-stable",
+      "/run/current-system/sw/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/google-chrome",
+      "/usr/bin/chromium-browser",
+      "/usr/bin/chromium",
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        executablePath = candidate;
+        break;
+      }
+    }
+  }
+
   return await puppeteer.launch({
     headless: config.headless,
     defaultViewport: null,
+    executablePath,
     userDataDir,
     args: [
       "--no-sandbox",
@@ -369,15 +467,25 @@ export const fetchListingPageLinks = async (
   page: Page,
   url: string,
   options: { scroll?: boolean } = {},
+  sql?: SQL,
+  optionsOverride?: { refreshCache?: boolean },
 ): Promise<ListingPageResult> => {
   console.log(`Navigating to listing: ${url}`);
-  const response = await page.goto(url, { waitUntil: "networkidle2", timeout: 45000 });
+  const response = await gotoWithTransientServerRetry(
+    page,
+    url,
+    { waitUntil: "networkidle2", timeout: 45000 },
+    "Listing",
+    sql,
+    optionsOverride,
+  );
   if (response?.status() === 404) {
     console.log(`Listing pagination ended at: ${url}`);
     return [] as ListingPageResult;
   }
   assertSuccessfulPage(response, url, "Listing");
   assertPagePath(page, /^\/websites\/(?:[^/?#]+\/?)?$/, url, "Listing");
+
   const reportedTotalRaw = await page.$eval(
     "h1.breadcrumb-filters__title[data-count]",
     node => node.getAttribute("data-count"),
@@ -387,43 +495,54 @@ export const fetchListingPageLinks = async (
     : parseRequiredCount(reportedTotalRaw, "websites index data-count");
   const extractLinks = async (): Promise<string[]> => await page.evaluate(() => {
     const anchors = Array.from(document.querySelectorAll("a"));
-    const targetSubPath = "/sites/sub" + "mit";
-    return Array.from(new Set(
-      anchors
-        .map(a => a.href)
-        .filter(href => href && href.includes("/sites/") && !href.includes(targetSubPath) && !href.includes("#")),
-    ));
+    return anchors
+      .map(a => a.href)
+      .filter(href => href.includes("awwwards.com/sites/"))
+      .filter(href => !href.includes("/sites/sites_of_the_day"))
+      .filter(href => !href.includes("/sites/nominees"));
   });
-  const initialPageSize = (await extractLinks()).length;
-  const currentPageRaw = await page.$eval(
-    ".pagination__item--current",
-    node => node.textContent?.trim() ?? "",
-  ).catch(() => "");
-  const currentPage = /^\d+$/.test(currentPageRaw) ? Number(currentPageRaw) : undefined;
+
+  let links = await extractLinks();
+  const initialSize = links.length;
 
   if (options.scroll !== false) {
-    await scrollUntilStable(page, "li, .card-site, .card-slide, .card-directory-sp", 60);
+    await scrollUntilStable(page, "a[href*='/sites/']");
+    links = await extractLinks();
   }
 
-  const links = await extractLinks();
-  Object.defineProperties(links, {
-    reportedTotal: { value: reportedTotal, enumerable: false },
-    initialPageSize: { value: initialPageSize, enumerable: false },
-    currentPage: { value: currentPage, enumerable: false },
-  });
-  return links as ListingPageResult;
+  const uniqueLinks = Array.from(new Set(links));
+  console.log(`Extracted ${uniqueLinks.length} unique site links from listing (${links.length} total raw).`);
+  (uniqueLinks as ListingPageResult).reportedTotal = reportedTotal;
+  (uniqueLinks as ListingPageResult).initialPageSize = initialSize > 0 ? initialSize : undefined;
+
+  const urlObj = new URL(url);
+  const pageParam = urlObj.searchParams.get("page");
+  if (pageParam && /^\d+$/.test(pageParam)) {
+    (uniqueLinks as ListingPageResult).currentPage = Number(pageParam);
+  } else if (!urlObj.searchParams.has("page")) {
+    (uniqueLinks as ListingPageResult).currentPage = 1;
+  }
+  return uniqueLinks as ListingPageResult;
 };
 
 /**
  * Parses all necessary elements from a single detail page of Awwwards.
  */
-export const scrapeDetailPage = async (page: Page, awwwardsUrl: string, awardType: "SOTD" | "Nominee"): Promise<ScrapedData> => {
+export const scrapeDetailPage = async (
+  page: Page,
+  awwwardsUrl: string,
+  awardType: "SOTD" | "Nominee",
+  sql?: SQL,
+  optionsOverride?: { refreshCache?: boolean },
+): Promise<ScrapedData> => {
   console.log(`Scraping detail page: ${awwwardsUrl}`);
   const response = await gotoWithTransientServerRetry(
     page,
     awwwardsUrl,
     { waitUntil: "networkidle2", timeout: 60000 },
     "Site",
+    sql,
+    optionsOverride,
   );
   assertSuccessfulPage(response, awwwardsUrl, "Site");
   assertPagePath(page, /^\/sites\/[^/?#]+\/?$/, awwwardsUrl, "Site");
@@ -658,6 +777,14 @@ export const scrapeDetailPage = async (page: Page, awwwardsUrl: string, awardTyp
       // 10. Media assets (Images and Videos)
       const mediaList: Array<{ url: string; type: "image" | "video" }> = [];
 
+      const ogImageEl = document.querySelector("meta[property='og:image']") as HTMLMetaElement | null;
+      const ogImage = ogImageEl?.content || null;
+      if (ogImage && ogImage.startsWith("http")) {
+        if (!mediaList.some(m => m.url === ogImage)) {
+          mediaList.push({ url: ogImage, type: "image" });
+        }
+      }
+
       const images = Array.from(document.querySelectorAll(".gallery-site:not(.gallery-site--two-cols) img"));
       images.forEach(node => {
         const img = node as HTMLImageElement;
@@ -880,7 +1007,7 @@ export const scrapeDetailPage = async (page: Page, awwwardsUrl: string, awardTyp
       raw_json: JSON.stringify(v),
     }));
 
-    return {
+    const result: ScrapedData = {
       sourceUrl: awwwardsUrl,
       parser: "awwwards-site",
       meta: {
@@ -903,14 +1030,27 @@ export const scrapeDetailPage = async (page: Page, awwwardsUrl: string, awardTyp
       votes,
       inspirationSlugs: rawData.inspirationSlugs,
     };
-};
 
-export const scrapeInspirationPage = async (page: Page, sourceUrl: string): Promise<AssetScrapeData | null> => {
+    if (sql && site.live_url) {
+      await fetchAndCacheExternalSite(page, sql, site.live_url, optionsOverride);
+    }
+
+    return result;
+  };
+
+export const scrapeInspirationPage = async (
+  page: Page,
+  sourceUrl: string,
+  sql?: SQL,
+  optionsOverride?: { refreshCache?: boolean },
+): Promise<AssetScrapeData | null> => {
   const response = await gotoWithTransientServerRetry(
     page,
     sourceUrl,
     { waitUntil: "domcontentloaded", timeout: 60000 },
     "Inspiration",
+    sql,
+    optionsOverride,
   );
   assertSuccessfulPage(response, sourceUrl, "Inspiration");
   assertPagePath(page, /^\/inspiration\/[^/?#]+\/?$/, sourceUrl, "Inspiration");
@@ -1013,8 +1153,20 @@ export const scrapeInspirationPage = async (page: Page, sourceUrl: string): Prom
   };
 };
 
-export const scrapeElementsIndexPage = async (page: Page, sourceUrl: string): Promise<ElementsIndexPageResult> => {
-  const response = await page.goto(sourceUrl, { waitUntil: "networkidle2", timeout: 60000 });
+export const scrapeElementsIndexPage = async (
+  page: Page,
+  sourceUrl: string,
+  sql?: SQL,
+  optionsOverride?: { refreshCache?: boolean },
+): Promise<ElementsIndexPageResult> => {
+  const response = await gotoWithTransientServerRetry(
+    page,
+    sourceUrl,
+    { waitUntil: "networkidle2", timeout: 60000 },
+    "Elements index",
+    sql,
+    optionsOverride,
+  );
   assertSuccessfulPage(response, sourceUrl, "Elements index");
   assertPagePath(page, /^\/elements\/?$/, sourceUrl, "Elements index");
   await scrollUntilStable(page, "a[href*='/inspiration/']", 400);
@@ -1159,9 +1311,21 @@ export const scrapeDirectoryIndexPage = async (page: Page, sourceUrl: string): P
   });
 };
 
-export const scrapeDirectoryProfilePage = async (page: Page, sourceUrl: string): Promise<DirectoryProfileData | null> => {
+export const scrapeDirectoryProfilePage = async (
+  page: Page,
+  sourceUrl: string,
+  sql?: SQL,
+  optionsOverride?: { refreshCache?: boolean },
+): Promise<DirectoryProfileData | null> => {
   try {
-    await page.goto(sourceUrl, { waitUntil: "networkidle2", timeout: 60000 });
+    await gotoWithTransientServerRetry(
+      page,
+      sourceUrl,
+      { waitUntil: "networkidle2", timeout: 60000 },
+      "Directory profile",
+      sql,
+      optionsOverride,
+    );
 
     return await page.evaluate(() => {
       const username = location.pathname.split("/").filter(Boolean).pop() || "";
@@ -1225,8 +1389,20 @@ export const storeDirectoryProfileData = async (sql: SQL, profile: DirectoryProf
   });
 };
 
-export const scrapeCollectionsIndexPage = async (page: Page, sourceUrl: string): Promise<CollectionIndexResult> => {
-  const response = await page.goto(sourceUrl, { waitUntil: "networkidle2", timeout: 60000 });
+export const scrapeCollectionsIndexPage = async (
+  page: Page,
+  sourceUrl: string,
+  sql?: SQL,
+  optionsOverride?: { refreshCache?: boolean },
+): Promise<CollectionIndexResult> => {
+  const response = await gotoWithTransientServerRetry(
+    page,
+    sourceUrl,
+    { waitUntil: "networkidle2", timeout: 60000 },
+    "Collections index",
+    sql,
+    optionsOverride,
+  );
   assertSuccessfulPage(response, sourceUrl, "Collections index");
   assertPagePath(page, /^\/collections\/?$/, sourceUrl, "Collections index");
   await scrollUntilStable(page, "figure[data-model], .card-slide", 400);
@@ -1341,8 +1517,20 @@ export const scrapeCollectionsIndexPage = async (page: Page, sourceUrl: string):
   return collections as CollectionIndexResult;
 };
 
-export const scrapeCollectionDetailPage = async (page: Page, sourceUrl: string): Promise<{ collection: CollectionSummaryData; items: CollectionItemData[] } | null> => {
-  const response = await page.goto(sourceUrl, { waitUntil: "networkidle2", timeout: 60000 });
+export const scrapeCollectionDetailPage = async (
+  page: Page,
+  sourceUrl: string,
+  sql?: SQL,
+  optionsOverride?: { refreshCache?: boolean },
+): Promise<{ collection: CollectionSummaryData; items: CollectionItemData[] } | null> => {
+  const response = await gotoWithTransientServerRetry(
+    page,
+    sourceUrl,
+    { waitUntil: "networkidle2", timeout: 60000 },
+    "Collection",
+    sql,
+    optionsOverride,
+  );
   assertSuccessfulPage(response, sourceUrl, "Collection");
   assertPagePath(page, /^\/[^/?#]+\/collections\/[^/?#]+\/?$/, sourceUrl, "Collection");
 
@@ -1561,27 +1749,35 @@ export const storeCollectionDetailData = async (
   return storageSlug;
 };
 
+export type ScrapeTargetResult =
+  | { kind: "site"; data: ScrapedData }
+  | { kind: "asset"; data: AssetScrapeData }
+  | { kind: "collection"; data: { collection: CollectionSummaryData; items: CollectionItemData[] } }
+  | { kind: "directory"; data: DirectoryProfileData };
+
 export const scrapeTargetUrl = async (
   page: Page,
   sourceUrl: string,
   awardType: "SOTD" | "Nominee",
-): Promise<{ kind: "site"; data: ScrapedData } | { kind: "asset"; data: AssetScrapeData } | null> => {
+  sql?: SQL,
+  optionsOverride?: { refreshCache?: boolean },
+): Promise<ScrapeTargetResult | null> => {
   switch (detectParser(sourceUrl)) {
     case "site": {
-      const data = await scrapeDetailPage(page, sourceUrl, awardType);
+      const data = await scrapeDetailPage(page, sourceUrl, awardType, sql, optionsOverride);
       return data ? { kind: "site", data } : null;
     }
     case "element": {
-      const data = await scrapeInspirationPage(page, sourceUrl);
+      const data = await scrapeInspirationPage(page, sourceUrl, sql, optionsOverride);
       return data ? { kind: "asset", data } : null;
     }
     case "collection": {
-      const data = await scrapeCollectionPage(page, sourceUrl);
-      return data ? { kind: "asset", data } : null;
+      const data = await scrapeCollectionDetailPage(page, sourceUrl, sql, optionsOverride);
+      return data ? { kind: "collection", data } : null;
     }
     case "directory": {
-      const data = await scrapeDirectoryPage(page, sourceUrl);
-      return data ? { kind: "asset", data } : null;
+      const data = await scrapeDirectoryProfilePage(page, sourceUrl, sql, optionsOverride);
+      return data ? { kind: "directory", data } : null;
     }
   }
 };

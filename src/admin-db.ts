@@ -172,6 +172,11 @@ export const loadSitePageData = async (slug: string): Promise<{
     SELECT site_slug, media_type, source_url, preview_url, local_path
     FROM site_media
     WHERE site_slug = ${slug}
+    UNION
+    SELECT ${slug} AS site_slug, 'image' AS media_type, media_url AS source_url, media_url AS preview_url, NULL AS local_path
+    FROM collection_items
+    WHERE (element_slug = ${slug} OR item_url LIKE '%/sites/' || ${slug})
+      AND media_url LIKE '%submissions%'
     ORDER BY media_type ASC, source_url ASC
   ` as SiteMediaRow[];
   const votes = await sql`

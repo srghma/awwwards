@@ -22,6 +22,13 @@ export interface DbUser {
   raw_json?: string | null;
 }
 
+export interface DbRawPageCache {
+  url: string;
+  html: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
 export interface DbSite {
   slug: string;
   title: string;
@@ -683,3 +690,22 @@ export const setScraperMetadata = async (sql: SQL, key: string, value: string): 
     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
   `;
 };
+
+export const getRawPageCache = async (sql: SQL, url: string): Promise<string | null> => {
+  const rows = await sql`SELECT html FROM raw_pages_cache WHERE url = ${url} LIMIT 1` as Array<{ html: string }>;
+  return rows[0]?.html ?? null;
+};
+
+export const saveRawPageCache = async (sql: SQL, url: string, html: string): Promise<void> => {
+  await sql`
+    INSERT INTO raw_pages_cache (url, html, created_at, updated_at)
+    VALUES (${url}, ${html}, now(), now())
+    ON CONFLICT (url) DO UPDATE SET html = EXCLUDED.html, updated_at = now()
+  `;
+};
+
+export const hasRawPageCache = async (sql: SQL, url: string): Promise<boolean> => {
+  const rows = await sql`SELECT 1 FROM raw_pages_cache WHERE url = ${url} LIMIT 1`;
+  return rows.length > 0;
+};
+

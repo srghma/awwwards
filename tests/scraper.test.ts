@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { parseConfig } from "../src/args";
 import { downloadMedia } from "../src/media";
-import { effectiveCollectionsIndexTotal, parseOptionalScore, parseRequiredCount, safeParseFloat, sanitizeUrl } from "../src/scraper";
+import { effectiveCollectionsIndexTotal, fetchAndCacheExternalSite, parseOptionalScore, parseRequiredCount, safeParseFloat, sanitizeUrl } from "../src/scraper";
+import { getRawPageCache, saveRawPageCache, hasRawPageCache } from "../src/db";
+import { getSearchPreviewImages } from "../app/_components/route-pages";
 import { existsSync, unlinkSync } from "fs";
 
 describe("CLI Arguments Parser", () => {
@@ -133,5 +135,72 @@ describe("Data Validation Helpers", () => {
     expect(sanitizeUrl("ftp://invalid-scheme.com")).toBeNull();
     expect(sanitizeUrl("plain-text-not-url")).toBeNull();
     expect(sanitizeUrl(null)).toBeNull();
+  });
+});
+
+describe("Search Preview Images Generator", () => {
+  it("should generate 1x and 2x search preview image URLs with resolutions for a site", () => {
+    const media = [
+      {
+        source_url: "https://assets.awwwards.com/awards/submissions/2022/05/627e2c9d4f105044153326.jpg",
+        preview_url: "https://assets.awwwards.com/awards/submissions/2022/05/627e2c9d4f105044153326.jpg",
+      },
+    ];
+
+    const previews = getSearchPreviewImages(media);
+    expect(previews.length).toBe(2);
+    expect(previews[0]).toEqual({
+      url: "https://assets.awwwards.com/awards/media/cache/thumb_440_330/submissions/2022/05/627e2c9d4f105044153326.jpg",
+      resolution: "440 × 330",
+    });
+    expect(previews[1]).toEqual({
+      url: "https://assets.awwwards.com/awards/media/cache/thumb_880_660/submissions/2022/05/627e2c9d4f105044153326.jpg",
+      resolution: "880 × 660",
+    });
+  });
+
+  it("should return empty array if media does not contain a submission path", () => {
+    const media = [
+      { source_url: "https://assets.awwwards.com/awards/element/2022/05/pic.jpg" },
+    ];
+    expect(getSearchPreviewImages(media)).toEqual([]);
+  });
+});
+
+describe("Raw Pages Cache Database Layer", () => {
+  it("should insert and retrieve raw HTML from raw_pages_cache", async () => {
+    const pgUser = process.env["PGUSER"] ?? process.env["USER"] ?? "postgres";
+    const pgPort = process.env["PGPORT"] ?? "55432";
+    const connectionString = process.env["DATABASE_URL"] || `postgresql://${pgUser}@127.0.0.1:${pgPort}/awwwards`;
+    const { SQL } = await import("bun");
+    const sql = new SQL(connectionString);
+
+    const testUrl = `https://www.awwwards.com/test-cache-page-${Date.now()}`;
+    const testHtml = "<html><body><h1>Test Cache Page</h1></body></html>";
+
+    expect(await getRawPageCache(sql, testUrl)).toBeNull();
+    expect(await hasRawPageCache(sql, testUrl)).toBe(false);
+
+    await saveRawPageCache(sql, testUrl, testHtml);
+
+    expect(await getRawPageCache(sql, testUrl)).toBe(testHtml);
+    expect(await hasRawPageCache(sql, testUrl)).toBe(true);
+
+    await sql`DELETE FROM raw_pages_cache WHERE url = ${testUrl}`;
+    await sql.close();
+  });
+
+  it("should return null and skip fetching for internal awwwards or invalid live URLs", async () => {
+    const pgUser = process.env["PGUSER"] ?? process.env["USER"] ?? "postgres";
+    const pgPort = process.env["PGPORT"] ?? "55432";
+    const connectionString = process.env["DATABASE_URL"] || `postgresql://${pgUser}@127.0.0.1:${pgPort}/awwwards`;
+    const { SQL } = await import("bun");
+    const sql = new SQL(connectionString);
+    const mockPage = {} as any;
+
+    expect(await fetchAndCacheExternalSite(mockPage, sql, "invalid-url")).toBeNull();
+    expect(await fetchAndCacheExternalSite(mockPage, sql, "https://www.awwwards.com/sites/something")).toBeNull();
+
+    await sql.close();
   });
 });

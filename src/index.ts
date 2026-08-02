@@ -86,7 +86,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
           console.log(`[${workerId}] Resuming ${elements.length} of ${queuedCount} queued inspiration URLs; skipping the elements index.`);
         } else {
           await saveProgress("elements-index", elementsUrl);
-          const discovered = await scrapeElementsIndexPage(page, elementsUrl);
+          const discovered = await scrapeElementsIndexPage(page, elementsUrl, sql);
           elements = discovered;
           progress.discovered = discovered.reportedTotal ?? discovered.length;
           if (discovered.reportedTotal != null) {
@@ -97,7 +97,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
         }
       } else {
         await saveProgress("elements-index", elementsUrl);
-        const discovered = await scrapeElementsIndexPage(page, elementsUrl);
+        const discovered = await scrapeElementsIndexPage(page, elementsUrl, sql);
         elements = discovered;
         progress.discovered = discovered.reportedTotal ?? discovered.length;
         if (discovered.reportedTotal != null) {
@@ -117,7 +117,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
         const elementPage = await browser!.newPage();
         try {
           await configurePageBandwidth(elementPage);
-          const element = await scrapeTargetUrl(elementPage, elementEntry.url, "SOTD");
+          const element = await scrapeTargetUrl(elementPage, elementEntry.url, "SOTD", sql);
           if (!element || element.kind !== "asset") {
             throw new Error(`Expected inspiration asset result for ${elementEntry.url}`);
           }
@@ -140,7 +140,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
           const sitePage = await browser!.newPage();
           try {
             await configurePageBandwidth(sitePage);
-            const site = await scrapeTargetUrl(sitePage, siteUrl, "SOTD");
+            const site = await scrapeTargetUrl(sitePage, siteUrl, "SOTD", sql);
             if (!site || site.kind !== "site") {
               throw new Error(`Expected site result for linked URL ${siteUrl}`);
             }
@@ -154,6 +154,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
                   linkedElementPage,
                   `https://www.awwwards.com/inspiration/${inspirationSlug}`,
                   "SOTD",
+                  sql,
                 );
                 if (!linkedElement || linkedElement.kind !== "asset") {
                   throw new Error(`Expected inspiration asset for ${inspirationSlug}`);
@@ -209,7 +210,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
         const itemPage = await browser!.newPage();
         try {
           await configurePageBandwidth(itemPage);
-          const result = await scrapeTargetUrl(itemPage, item.item_url, "SOTD");
+          const result = await scrapeTargetUrl(itemPage, item.item_url, "SOTD", sql);
           if (item.item_type === "site") {
             if (!result || result.kind !== "site") throw new Error(`Expected site result for collection item ${item.item_url}`);
             await storeScrapedData(sql, result.data);
@@ -235,7 +236,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
 
     const scrapeCollectionsAndDirectory = async (): Promise<void> => {
       await saveProgress("collections-index", "https://www.awwwards.com/collections/");
-      const collections = await scrapeCollectionsIndexPage(page, "https://www.awwwards.com/collections/");
+      const collections = await scrapeCollectionsIndexPage(page, "https://www.awwwards.com/collections/", sql);
       progress.discovered = collections.reportedTotal ?? collections.length;
       if (collections.reportedTotal != null) {
         await setScraperMetadata(sql, "collections_total", String(collections.reportedTotal));
@@ -246,7 +247,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
         const detailPage = await browser!.newPage();
         try {
           await configurePageBandwidth(detailPage);
-          const detail = await scrapeCollectionDetailPage(detailPage, collectionUrl);
+          const detail = await scrapeCollectionDetailPage(detailPage, collectionUrl, sql);
           if (detail) {
             const siteItems = detail.items.filter(item => item.item_type === "site").length;
             const inspirationItems = detail.items.filter(item => item.item_type === "inspiration").length;
@@ -262,7 +263,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
               const sitePage = await browser!.newPage();
               try {
                 await configurePageBandwidth(sitePage);
-                const site = await scrapeTargetUrl(sitePage, item.site_url, "SOTD");
+                const site = await scrapeTargetUrl(sitePage, item.site_url, "SOTD", sql);
                 if (site?.kind === "site") {
                   if (!siteAlreadyStored) await storeScrapedData(sql, site.data);
                   for (const elementSlug of site.data.inspirationSlugs) {
@@ -270,7 +271,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
                     const inspirationPage = await browser!.newPage();
                     try {
                       await configurePageBandwidth(inspirationPage);
-                      const element = await scrapeTargetUrl(inspirationPage, `https://www.awwwards.com/inspiration/${elementSlug}`, "SOTD");
+                      const element = await scrapeTargetUrl(inspirationPage, `https://www.awwwards.com/inspiration/${elementSlug}`, "SOTD", sql);
                       if (!element || element.kind !== "asset") throw new Error(`Expected inspiration asset for ${elementSlug}`);
                       await storeAssetScrapeData(sql, element.data);
                     } catch (err) {
@@ -303,7 +304,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
               const elementPage = await browser!.newPage();
               try {
                 await configurePageBandwidth(elementPage);
-                const element = await scrapeTargetUrl(elementPage, item.item_url, "SOTD");
+                const element = await scrapeTargetUrl(elementPage, item.item_url, "SOTD", sql);
                 if (element?.kind === "asset") await storeAssetScrapeData(sql, element.data);
                 progress.completed += 1;
               } catch (err) {
@@ -337,7 +338,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
         const profilePage = await browser!.newPage();
         try {
           await configurePageBandwidth(profilePage);
-          const detail = await scrapeDirectoryProfilePage(profilePage, profile.url);
+          const detail = await scrapeDirectoryProfilePage(profilePage, profile.url, sql);
           if (detail) {
             await storeDirectoryProfileData(sql, detail);
           }
@@ -379,7 +380,8 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
           const scrapedData = await scrapeDetailPage(
             detailPage,
             link,
-            config.type === "nominees" ? "Nominee" : "SOTD"
+            config.type === "nominees" ? "Nominee" : "SOTD",
+            sql,
           );
 
           if (scrapedData) {
@@ -389,7 +391,7 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
               const inspirationPage = await browser!.newPage();
               try {
                 await configurePageBandwidth(inspirationPage);
-                const element = await scrapeTargetUrl(inspirationPage, `https://www.awwwards.com/inspiration/${elementSlug}`, "SOTD");
+                const element = await scrapeTargetUrl(inspirationPage, `https://www.awwwards.com/inspiration/${elementSlug}`, "SOTD", sql);
                 if (!element || element.kind !== "asset") throw new Error(`Expected inspiration asset for ${elementSlug}`);
                 await storeAssetScrapeData(sql, element.data);
               } catch (err) {
@@ -572,7 +574,8 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
       const result = await scrapeTargetUrl(
         page,
         config.targetUrl,
-        config.type === "nominees" ? "Nominee" : "SOTD"
+        config.type === "nominees" ? "Nominee" : "SOTD",
+        sql,
       );
 
       if (!result) {
@@ -585,8 +588,12 @@ const isNavigationTimeoutError = (err: unknown): boolean => {
         if (config.refresh || !(await siteExists(sql, slug))) {
           await storeScrapedData(sql, result.data);
         }
-      } else {
+      } else if (result.kind === "asset") {
         await storeAssetScrapeData(sql, result.data);
+      } else if (result.kind === "collection") {
+        await storeCollectionDetailData(sql, result.data);
+      } else if (result.kind === "directory") {
+        await storeDirectoryProfileData(sql, result.data);
       }
 
       console.log("=== Single URL scrape finished successfully! ===");

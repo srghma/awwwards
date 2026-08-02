@@ -1056,6 +1056,7 @@ export const deleteX6Content = async (
 };
 
 export type SubmitX6ModerationContentInput = {
+  title?: string;
   files: string[];
   sourceUrl: string;
   type: "video" | "image" | "mixed";
@@ -1077,6 +1078,7 @@ export const submitX6ModerationContent = async (
     type: input.type,
     parser: input.parser,
   };
+  if (input.title) payload["title"] = input.title;
   if (meta) payload["meta"] = meta;
 
   const response = await fetchWithRetry(MODERATION_CONTENT_URL, {

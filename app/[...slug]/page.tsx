@@ -10,6 +10,7 @@ import {
   loadUserVotesPageData,
   loadWebsitesPageData,
 } from "../../src/admin-db-client";
+import { getSearchPreviewImages } from "../_components/route-pages";
 
 export const dynamic = "force-dynamic";
 
@@ -321,9 +322,28 @@ export default async function Page({
     if (!site) notFound();
     const colors = tags.filter(tag => tag.tag_type === "color");
     const textTags = tags.filter(tag => tag.tag_type === "tag");
+    const searchPreviews = getSearchPreviewImages(media);
     return (
       <PageShell title={site.title} subtitle={`${site.award_type} · ${site.award_date ?? "Unknown date"}`}>
         <section className="grid">
+          {searchPreviews.length > 0 ? (
+            <article className="panel panel-wide">
+              <div className="panel-head">
+                <h2>Search preview images</h2>
+                <span>{searchPreviews.length}</span>
+              </div>
+              <div className="media-grid">
+                {searchPreviews.map(item => (
+                  <div key={item.url} className="card">
+                    <img loading="lazy" src={item.url} alt={`${site.title} preview ${item.resolution}`} />
+                    <strong>{item.resolution}</strong>
+                    <small>{item.url}</small>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ) : null}
+
           <article className="panel panel-wide">
             <div className="panel-head">
               <h2>Creators</h2>

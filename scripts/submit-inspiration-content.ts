@@ -134,14 +134,19 @@ const main = async (): Promise<void> => {
       const siteTags = row.site_tags ?? [];
       const tags = Array.from(new Set([...elementTags, ...siteTags].map(t => t.trim()).filter(Boolean)));
 
+      const isSotd = row.site_award_type === "SOTD";
+      const title = isSotd ? `${row.title} (SOTD)` : row.title;
+
       try {
         const content = await submitX6ModerationContent(apiKey, {
+          title,
           files,
           sourceUrl: row.source_url,
           type: row.media_type,
           parser: "awwwards-inspiration",
           meta: {
             ...metadataFor(row),
+            title,
             tags,
           },
         }, logger);
